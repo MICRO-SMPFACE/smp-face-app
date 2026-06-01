@@ -3,6 +3,7 @@
 import { useState, useCallback } from 'react'
 import UploadZone from '@/components/UploadZone'
 import FaceOptionsPanel from '@/components/FaceOptionsPanel'
+import FaceMaskEditor, { FaceRect } from '@/components/FaceMaskEditor'
 import ResultViewer from '@/components/ResultViewer'
 import BeforeAfterView from '@/components/BeforeAfterView'
 import { FaceOptions } from '@/lib/prompt'
@@ -16,13 +17,15 @@ const DEFAULT_OPTIONS: FaceOptions = {
   attractLevel: 2,
 }
 
+const DEFAULT_RECT: FaceRect = { x: 0.31, y: 0.05, width: 0.38, height: 0.50 }
+
 interface Result { b64: string | null; url: string | null }
 type Step = 'step1' | 'step2' | 'done'
 
-// 브라우저 Canvas로 얼굴 합성 (서버 시간 제한 없음)
 async function composeFaceOnImage(
   afterImageSrc: string,
-  faceSrc: string
+  faceSrc: string,
+  faceRect: FaceRect
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const afterImg = new Image()
@@ -34,26 +37,17 @@ async function composeFaceOnImage(
       faceImg.onload = () => {
         const SIZE = 1024
         const canvas = document.createElement('canvas')
-        canvas.width  = SIZE
-        canvas.height = SIZE
+        canvas.width = SIZE; canvas.height = SIZE
         const ctx = canvas.getContext('2d')!
 
-        // 후사진 그리기 (1024x1024로 맞춤)
         ctx.drawImage(afterImg, 0, 0, SIZE, SIZE)
 
-        // 얼굴 영역 계산 (서버와 동일한 좌표)
-        const faceW = Math.round(SIZE * 0.38)
-        const faceH = Math.round(SIZE * 0.48)
-        const left  = Math.round((SIZE - faceW) / 2)
-        const top   = Math.round(SIZE * 0.06)
+        const px = Math.round(faceRect.x      * SIZE)
+        const py = Math.round(faceRect.y      * SIZE)
+        const pw = Math.round(faceRect.width  * SIZE)
+        const ph = Math.round(faceRect.height * SIZE)
 
-        // 선택된 얼굴에서 얼굴 영역만 크롭해서 후사진에 합성
-        ctx.drawImage(
-          faceImg,
-          left, top, faceW, faceH,   // 소스(얼굴 이미지) 크롭 영역
-          left, top, faceW, faceH    // 대상(후사진) 위치
-        )
-
+        ctx.drawImage(faceImg, px, py, pw, ph, px, py, pw, ph)
         resolve(canvas.toDataURL('image/png'))
       }
       faceImg.onerror = reject
@@ -69,6 +63,7 @@ export default function Home() {
   const [beforeFile, setBeforeFile]       = useState<File | null>(null)
   const [beforePreview, setBeforePreview] = useState<string | null>(null)
   const [afterPreview, setAfterPreview]   = useState<string | null>(null)
+  const [faceRect, setFaceRect]           = useState<FaceRect>(DEFAULT_RECT)
   const [options, setOptions]             = useState<FaceOptions>(DEFAULT_OPTIONS)
   const [count, setCount]                 = useState(2)
   const [step1Results, setStep1Results]   = useState<Result[]>([])
@@ -85,6 +80,7 @@ export default function Home() {
     reader.readAsDataURL(file)
     setStep1Results([])
     setSelectedIndex(-1)
+    setFaceRect(DEFAULT_RECT)
     setError(null)
   }, [])
 
@@ -95,7 +91,6 @@ export default function Home() {
     setError(null)
   }, [])
 
-  // STEP 1: 전사진 얼굴 생성
   const generateStep1 = useCallback(async () => {
     if (!beforeFile) return
     setLoading(true)
@@ -105,10 +100,13 @@ export default function Home() {
 
     try {
       const fd = new FormData()
-      fd.append('mode', 'step1')
-      fd.append('image', beforeFile)
+      fd.append('image',   beforeFile)
       fd.append('options', JSON.stringify(options))
-      fd.append('count', String(count))
+      fd.append('count',   String(count))
+      fd.append('faceX',   String(faceRect.x))
+      fd.append('faceY',   String(faceRect.y))
+      fd.append('faceW',   String(faceRect.width))
+      fd.append('faceH',   String(faceRect.height))
 
       const res  = await fetch('/api/generate', { method: 'POST', body: fd })
       const data = await res.json()
@@ -119,9 +117,8 @@ export default function Home() {
     } finally {
       setLoading(false)
     }
-  }, [beforeFile, options, count])
+  }, [beforeFile, options, count, faceRect])
 
-  // STEP 2: 브라우저 Canvas로 얼굴 합성 (서버 요청 없음)
   const generateStep2 = useCallback(async () => {
     if (!afterPreview || selectedIndex < 0) return
     setLoading(true)
@@ -133,10 +130,8 @@ export default function Home() {
         ? `data:image/png;base64,${selectedFace.b64}`
         : selectedFace.url || ''
 
-      const beforeSrc = faceSrc
-      const afterSrc  = await composeFaceOnImage(afterPreview, faceSrc)
-
-      setFinalBefore(beforeSrc)
+      const afterSrc = await composeFaceOnImage(afterPreview, faceSrc, faceRect)
+      setFinalBefore(faceSrc)
       setFinalAfter(afterSrc)
       setStep('done')
     } catch (e: unknown) {
@@ -144,7 +139,7 @@ export default function Home() {
     } finally {
       setLoading(false)
     }
-  }, [afterPreview, selectedIndex, step1Results])
+  }, [afterPreview, selectedIndex, step1Results, faceRect])
 
   const reset = useCallback(() => {
     setStep('step1')
@@ -152,6 +147,7 @@ export default function Home() {
     setAfterPreview(null)
     setStep1Results([]); setSelectedIndex(-1)
     setFinalBefore(null); setFinalAfter(null)
+    setFaceRect(DEFAULT_RECT)
     setError(null)
   }, [])
 
@@ -162,7 +158,6 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white border-b border-gray-100 px-6 py-4">
         <div className="max-w-5xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -183,7 +178,6 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Step indicator */}
       <div className="max-w-5xl mx-auto px-6 pt-6">
         <div className="flex items-center gap-3 mb-6">
           {(['step1', 'step2', 'done'] as Step[]).map((s, i) => {
@@ -214,7 +208,6 @@ export default function Home() {
 
       <main className="max-w-5xl mx-auto px-6 pb-8">
 
-        {/* DONE */}
         {step === 'done' && finalBefore && finalAfter && (
           <BeforeAfterView
             beforeSrc={finalBefore}
@@ -225,18 +218,31 @@ export default function Home() {
           />
         )}
 
-        {/* STEP 1 & 2 */}
         {step !== 'done' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-
-            {/* 왼쪽 */}
             <div className="space-y-6">
+
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">1단계</span>
                   <h2 className="text-sm font-semibold text-gray-900">전사진 업로드</h2>
                 </div>
-                <UploadZone label="시술 전 사진" onFile={handleBeforeImage} preview={beforePreview} />
+                {!beforePreview ? (
+                  <UploadZone label="시술 전 사진" onFile={handleBeforeImage} preview={null} />
+                ) : (
+                  <div className="space-y-3">
+                    <FaceMaskEditor
+                      imageSrc={beforePreview}
+                      onFaceRect={setFaceRect}
+                    />
+                    <button
+                      onClick={() => { setBeforePreview(null); setBeforeFile(null); setStep1Results([]); }}
+                      className="w-full py-2 text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded-lg transition-colors"
+                    >
+                      사진 다시 선택
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
@@ -264,7 +270,6 @@ export default function Home() {
               )}
             </div>
 
-            {/* 오른쪽 */}
             <div className="space-y-6">
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <div className="flex items-center gap-2 mb-4">
@@ -311,10 +316,7 @@ export default function Home() {
                     loading={loading && step === 'step1'}
                     selectable={true}
                     selectedIndex={selectedIndex}
-                    onSelect={(i) => {
-                      setSelectedIndex(i)
-                      setStep('step2')
-                    }}
+                    onSelect={(i) => { setSelectedIndex(i); setStep('step2') }}
                   />
                 </div>
               )}
