@@ -17,23 +17,66 @@ const DEFAULT_OPTIONS: FaceOptions = {
 }
 
 interface Result { b64: string | null; url: string | null }
-
 type Step = 'step1' | 'step2' | 'done'
 
+// 브라우저 Canvas로 얼굴 합성 (서버 시간 제한 없음)
+async function composeFaceOnImage(
+  afterImageSrc: string,
+  faceSrc: string
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const afterImg = new Image()
+    const faceImg  = new Image()
+    afterImg.crossOrigin = 'anonymous'
+    faceImg.crossOrigin  = 'anonymous'
+
+    afterImg.onload = () => {
+      faceImg.onload = () => {
+        const SIZE = 1024
+        const canvas = document.createElement('canvas')
+        canvas.width  = SIZE
+        canvas.height = SIZE
+        const ctx = canvas.getContext('2d')!
+
+        // 후사진 그리기 (1024x1024로 맞춤)
+        ctx.drawImage(afterImg, 0, 0, SIZE, SIZE)
+
+        // 얼굴 영역 계산 (서버와 동일한 좌표)
+        const faceW = Math.round(SIZE * 0.38)
+        const faceH = Math.round(SIZE * 0.48)
+        const left  = Math.round((SIZE - faceW) / 2)
+        const top   = Math.round(SIZE * 0.06)
+
+        // 선택된 얼굴에서 얼굴 영역만 크롭해서 후사진에 합성
+        ctx.drawImage(
+          faceImg,
+          left, top, faceW, faceH,   // 소스(얼굴 이미지) 크롭 영역
+          left, top, faceW, faceH    // 대상(후사진) 위치
+        )
+
+        resolve(canvas.toDataURL('image/png'))
+      }
+      faceImg.onerror = reject
+      faceImg.src = faceSrc
+    }
+    afterImg.onerror = reject
+    afterImg.src = afterImageSrc
+  })
+}
+
 export default function Home() {
-  const [step, setStep]                       = useState<Step>('step1')
-  const [beforeFile, setBeforeFile]           = useState<File | null>(null)
-  const [beforePreview, setBeforePreview]     = useState<string | null>(null)
-  const [afterFile, setAfterFile]             = useState<File | null>(null)
-  const [afterPreview, setAfterPreview]       = useState<string | null>(null)
-  const [options, setOptions]                 = useState<FaceOptions>(DEFAULT_OPTIONS)
-  const [count, setCount]                     = useState(2)
-  const [step1Results, setStep1Results]       = useState<Result[]>([])
-  const [selectedIndex, setSelectedIndex]     = useState(-1)
-  const [finalBefore, setFinalBefore]         = useState<string | null>(null)
-  const [finalAfter, setFinalAfter]           = useState<string | null>(null)
-  const [loading, setLoading]                 = useState(false)
-  const [error, setError]                     = useState<string | null>(null)
+  const [step, setStep]                   = useState<Step>('step1')
+  const [beforeFile, setBeforeFile]       = useState<File | null>(null)
+  const [beforePreview, setBeforePreview] = useState<string | null>(null)
+  const [afterPreview, setAfterPreview]   = useState<string | null>(null)
+  const [options, setOptions]             = useState<FaceOptions>(DEFAULT_OPTIONS)
+  const [count, setCount]                 = useState(2)
+  const [step1Results, setStep1Results]   = useState<Result[]>([])
+  const [selectedIndex, setSelectedIndex] = useState(-1)
+  const [finalBefore, setFinalBefore]     = useState<string | null>(null)
+  const [finalAfter, setFinalAfter]       = useState<string | null>(null)
+  const [loading, setLoading]             = useState(false)
+  const [error, setError]                 = useState<string | null>(null)
 
   const handleBeforeImage = useCallback((file: File) => {
     setBeforeFile(file)
@@ -46,7 +89,6 @@ export default function Home() {
   }, [])
 
   const handleAfterImage = useCallback((file: File) => {
-    setAfterFile(file)
     const reader = new FileReader()
     reader.onload = (e) => setAfterPreview(e.target?.result as string)
     reader.readAsDataURL(file)
@@ -79,46 +121,35 @@ export default function Home() {
     }
   }, [beforeFile, options, count])
 
-  // STEP 2: 선택된 얼굴 → 후사진에 적용
+  // STEP 2: 브라우저 Canvas로 얼굴 합성 (서버 요청 없음)
   const generateStep2 = useCallback(async () => {
-    if (!afterFile || selectedIndex < 0) return
+    if (!afterPreview || selectedIndex < 0) return
     setLoading(true)
     setError(null)
 
     try {
       const selectedFace = step1Results[selectedIndex]
-      if (!selectedFace?.b64) throw new Error('선택된 얼굴 데이터가 없습니다.')
+      const faceSrc = selectedFace.b64
+        ? `data:image/png;base64,${selectedFace.b64}`
+        : selectedFace.url || ''
 
-      const fd = new FormData()
-      fd.append('mode', 'step2')
-      fd.append('image', afterFile)
-      fd.append('selectedFace', selectedFace.b64)
-
-      const res  = await fetch('/api/generate', { method: 'POST', body: fd })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || '오류가 발생했습니다.')
-
-      const afterResult = data.results[0]
-      const afterSrc = afterResult.b64 ? `data:image/png;base64,${afterResult.b64}` : afterResult.url
-
-      // 전사진 결과도 저장
-      const beforeResult = step1Results[selectedIndex]
-      const beforeSrc = beforeResult.b64 ? `data:image/png;base64,${beforeResult.b64}` : beforeResult.url
+      const beforeSrc = faceSrc
+      const afterSrc  = await composeFaceOnImage(afterPreview, faceSrc)
 
       setFinalBefore(beforeSrc)
       setFinalAfter(afterSrc)
       setStep('done')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : '오류가 발생했습니다.')
+      setError(e instanceof Error ? e.message : '이미지 합성 중 오류가 발생했습니다.')
     } finally {
       setLoading(false)
     }
-  }, [afterFile, selectedIndex, step1Results])
+  }, [afterPreview, selectedIndex, step1Results])
 
   const reset = useCallback(() => {
     setStep('step1')
     setBeforeFile(null); setBeforePreview(null)
-    setAfterFile(null);  setAfterPreview(null)
+    setAfterPreview(null)
     setStep1Results([]); setSelectedIndex(-1)
     setFinalBefore(null); setFinalAfter(null)
     setError(null)
@@ -128,9 +159,6 @@ export default function Home() {
     const link = document.createElement('a')
     link.href = src; link.download = name; link.click()
   }
-
-  const stepLabel = step === 'step1' ? '1단계' : step === 'step2' ? '2단계' : '완료'
-  const stepDesc  = step === 'step1' ? '전사진 업로드 & 얼굴 생성' : step === 'step2' ? '후사진 업로드 & 적용' : '전/후 결과 확인'
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -160,22 +188,21 @@ export default function Home() {
         <div className="flex items-center gap-3 mb-6">
           {(['step1', 'step2', 'done'] as Step[]).map((s, i) => {
             const labels = ['1단계 · 전사진', '2단계 · 후사진', '완료']
-            const isDone = step === 'done' || (step === 'step2' && i === 0)
+            const currentIdx = ['step1','step2','done'].indexOf(step)
             const isCurrent = step === s
+            const isDonePrev = i < currentIdx
             return (
               <div key={s} className="flex items-center gap-3">
                 <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all ${
                   isCurrent ? 'bg-violet-600 text-white' :
-                  isDone && i < ['step1','step2','done'].indexOf(step) ? 'bg-violet-100 text-violet-600' :
+                  isDonePrev ? 'bg-violet-100 text-violet-600' :
                   'bg-gray-100 text-gray-400'
                 }`}>
-                  {isDone && i < ['step1','step2','done'].indexOf(step) ? (
+                  {isDonePrev ? (
                     <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
                     </svg>
-                  ) : (
-                    <span>{i + 1}</span>
-                  )}
+                  ) : <span>{i + 1}</span>}
                   {labels[i]}
                 </div>
                 {i < 2 && <div className="w-6 h-px bg-gray-200"></div>}
@@ -187,7 +214,7 @@ export default function Home() {
 
       <main className="max-w-5xl mx-auto px-6 pb-8">
 
-        {/* ── DONE: 전/후 결과 ── */}
+        {/* DONE */}
         {step === 'done' && finalBefore && finalAfter && (
           <BeforeAfterView
             beforeSrc={finalBefore}
@@ -198,14 +225,12 @@ export default function Home() {
           />
         )}
 
-        {/* ── STEP 1 & 2 ── */}
+        {/* STEP 1 & 2 */}
         {step !== 'done' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
 
             {/* 왼쪽 */}
             <div className="space-y-6">
-
-              {/* STEP 1: 전사진 업로드 + 옵션 */}
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">1단계</span>
@@ -228,7 +253,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* STEP 2: 후사진 업로드 */}
               {step === 'step2' && (
                 <div className="bg-white rounded-2xl border border-gray-100 p-6">
                   <div className="flex items-center gap-2 mb-4">
@@ -242,8 +266,6 @@ export default function Home() {
 
             {/* 오른쪽 */}
             <div className="space-y-6">
-
-              {/* STEP 1: 생성 설정 + 결과 */}
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">1단계</span>
@@ -271,7 +293,7 @@ export default function Home() {
                     beforeFile && !loading ? 'bg-violet-600 hover:bg-violet-700 text-white active:scale-[0.98]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                   }`}
                 >
-                  {loading && step !== 'step2' ? (
+                  {loading && step === 'step1' ? (
                     <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/></svg>생성 중...</>
                   ) : (
                     <><svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>전사진 얼굴 생성하기</>
@@ -281,13 +303,12 @@ export default function Home() {
                 {error && <div className="mt-3 p-3 bg-red-50 border border-red-100 rounded-lg"><p className="text-xs text-red-600">{error}</p></div>}
               </div>
 
-              {/* 생성 결과 (선택 가능) */}
-              {(step1Results.length > 0 || loading) && (
+              {(step1Results.length > 0 || (loading && step === 'step1')) && (
                 <div className="bg-white rounded-2xl border border-gray-100 p-6">
                   <ResultViewer
                     results={step1Results}
                     onRegenerate={generateStep1}
-                    loading={loading}
+                    loading={loading && step === 'step1'}
                     selectable={true}
                     selectedIndex={selectedIndex}
                     onSelect={(i) => {
@@ -298,7 +319,6 @@ export default function Home() {
                 </div>
               )}
 
-              {/* STEP 2: 후사진 적용 버튼 */}
               {step === 'step2' && (
                 <div className="bg-white rounded-2xl border border-gray-100 p-6">
                   <div className="flex items-center gap-2 mb-4">
@@ -312,12 +332,12 @@ export default function Home() {
                     </div>
                   )}
 
-                  <button onClick={generateStep2} disabled={!afterFile || selectedIndex < 0 || loading}
+                  <button onClick={generateStep2} disabled={!afterPreview || selectedIndex < 0 || loading}
                     className={`w-full py-3 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
-                      afterFile && selectedIndex >= 0 && !loading ? 'bg-violet-600 hover:bg-violet-700 text-white active:scale-[0.98]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      afterPreview && selectedIndex >= 0 && !loading ? 'bg-violet-600 hover:bg-violet-700 text-white active:scale-[0.98]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     }`}
                   >
-                    {loading ? (
+                    {loading && step === 'step2' ? (
                       <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/></svg>적용 중...</>
                     ) : (
                       <><svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>후사진에 동일 얼굴 적용하기</>
