@@ -17,11 +17,10 @@ interface Props {
 const DEFAULT_RECT: FaceRect = { x: 0.31, y: 0.05, width: 0.38, height: 0.50 }
 
 export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
-  const canvasRef   = useRef<HTMLCanvasElement>(null)
-  const imgRef      = useRef<HTMLImageElement | null>(null)
-  const [rect, setRect]           = useState<FaceRect | null>(null)
-  const [detecting, setDetecting] = useState(true)
-  const [mode, setMode]           = useState<'move' | 'draw'>('move')
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const imgRef    = useRef<HTMLImageElement | null>(null)
+  const [rect, setRect]     = useState<FaceRect>(DEFAULT_RECT)
+  const [mode, setMode]     = useState<'move' | 'draw'>('move')
   const [dragState, setDragState] = useState<{
     type: 'move' | 'draw' | null
     startX: number; startY: number
@@ -33,67 +32,16 @@ export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
     onFaceRect(r)
   }, [onFaceRect])
 
-  // MediaPipe를 window 전역으로 로드 (타입 선언 불필요)
-  const detectFace = useCallback(async (img: HTMLImageElement) => {
-    setDetecting(true)
-    try {
-      // MediaPipe CDN 스크립트 동적 로드
-      await new Promise<void>((resolve, reject) => {
-        if ((window as Window & { FaceDetection?: unknown }).FaceDetection) { resolve(); return }
-        const script = document.createElement('script')
-        script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js'
-        script.crossOrigin = 'anonymous'
-        script.onload = () => resolve()
-        script.onerror = () => reject(new Error('script load failed'))
-        document.head.appendChild(script)
-      })
-
-      const win = window as Window & { FaceDetection?: new (config: unknown) => {
-        setOptions: (opts: unknown) => void
-        onResults: (cb: (r: { detections: Array<{ boundingBox: { xCenter: number; yCenter: number; width: number; height: number } }> }) => void) => void
-        send: (input: unknown) => Promise<void>
-      }}
-
-      if (!win.FaceDetection) throw new Error('FaceDetection not available')
-
-      const fd = new win.FaceDetection({
-        locateFile: (file: string) =>
-          `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`,
-      })
-      fd.setOptions({ model: 'full', minDetectionConfidence: 0.4 })
-
-      await new Promise<void>((resolve) => {
-        fd.onResults((results) => {
-          if (results.detections.length > 0) {
-            const bb = results.detections[0].boundingBox
-            const pad = 0.07
-            applyRect({
-              x:      Math.max(0, bb.xCenter - bb.width  / 2 - pad),
-              y:      Math.max(0, bb.yCenter - bb.height / 2 - pad * 2.5),
-              width:  Math.min(1, bb.width  + pad * 2),
-              height: Math.min(1, bb.height + pad * 3.5),
-            })
-          } else {
-            applyRect(DEFAULT_RECT)
-          }
-          resolve()
-        })
-        fd.send({ image: img })
-      })
-    } catch {
-      applyRect(DEFAULT_RECT)
-    }
-    setDetecting(false)
-  }, [applyRect])
-
+  // 이미지 로드 → 기본 마스크 즉시 표시
   useEffect(() => {
     if (!imageSrc) return
-    setDetecting(true)
-    setRect(null)
     const img = new Image()
-    img.onload = () => { imgRef.current = img; detectFace(img) }
+    img.onload = () => {
+      imgRef.current = img
+      applyRect(DEFAULT_RECT)
+    }
     img.src = imageSrc
-  }, [imageSrc, detectFace])
+  }, [imageSrc, applyRect])
 
   // Canvas 그리기
   useEffect(() => {
@@ -104,7 +52,6 @@ export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, W, H)
     ctx.drawImage(img, 0, 0, W, H)
-    if (!rect) return
 
     const rx = rect.x * W, ry = rect.y * H
     const rw = rect.width * W, rh = rect.height * H
@@ -142,10 +89,9 @@ export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
       setDragState({ type: 'draw', startX: pos.x, startY: pos.y })
       return
     }
-    if (rect) {
-      const inRect = pos.x >= rect.x && pos.x <= rect.x + rect.width && pos.y >= rect.y && pos.y <= rect.y + rect.height
-      if (inRect) setDragState({ type: 'move', startX: pos.x, startY: pos.y, origRect: rect })
-    }
+    const inRect = pos.x >= rect.x && pos.x <= rect.x + rect.width &&
+                   pos.y >= rect.y && pos.y <= rect.y + rect.height
+    if (inRect) setDragState({ type: 'move', startX: pos.x, startY: pos.y, origRect: rect })
   }, [mode, rect])
 
   const onMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -153,8 +99,10 @@ export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
     const pos = getRelPos(e)
     if (dragState.type === 'draw') {
       applyRect({
-        x: Math.min(pos.x, dragState.startX), y: Math.min(pos.y, dragState.startY),
-        width: Math.abs(pos.x - dragState.startX), height: Math.abs(pos.y - dragState.startY),
+        x: Math.min(pos.x, dragState.startX),
+        y: Math.min(pos.y, dragState.startY),
+        width:  Math.abs(pos.x - dragState.startX),
+        height: Math.abs(pos.y - dragState.startY),
       })
       return
     }
@@ -170,32 +118,42 @@ export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
 
   const onMouseUp = useCallback(() => setDragState(p => ({ ...p, type: null })), [])
 
+  const resetRect = () => applyRect(DEFAULT_RECT)
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <div className="flex gap-2">
           <button onClick={() => setMode('move')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${mode === 'move' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-50 text-gray-600 border-gray-200'}`}>
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              mode === 'move' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-50 text-gray-600 border-gray-200'
+            }`}>
             ✥ 이동
           </button>
           <button onClick={() => setMode('draw')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${mode === 'draw' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-50 text-gray-600 border-gray-200'}`}>
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+              mode === 'draw' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-50 text-gray-600 border-gray-200'
+            }`}>
             ▭ 직접 그리기
           </button>
         </div>
-        <button onClick={() => imgRef.current && detectFace(imgRef.current)} disabled={detecting}
-          className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100 disabled:opacity-50 transition-all flex items-center gap-1">
-          {detecting ? (
-            <><svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/></svg>감지 중...</>
-          ) : '↺ 재감지'}
+        <button onClick={resetRect}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100 transition-all">
+          ↺ 초기화
         </button>
       </div>
-      <canvas ref={canvasRef} width={400} height={400}
+
+      <canvas
+        ref={canvasRef} width={400} height={400}
         className={`w-full rounded-xl ${mode === 'draw' ? 'cursor-crosshair' : 'cursor-move'}`}
-        onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
       />
+
       <p className="text-xs text-gray-400 text-center">
-        {mode === 'draw' ? '드래그해서 교체할 얼굴 영역을 직접 그리세요' : '보라색 영역을 드래그해서 위치를 조정하세요'}
+        {mode === 'draw'
+          ? '드래그해서 교체할 얼굴 영역을 직접 그리세요'
+          : '보라색 영역을 드래그해서 위치를 조정하세요'}
       </p>
     </div>
   )
