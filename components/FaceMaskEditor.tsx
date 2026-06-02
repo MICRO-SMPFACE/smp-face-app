@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 
 export interface FaceRect {
-  x: number      // 0~1 비율
+  x: number
   y: number
   width: number
   height: number
@@ -14,183 +14,189 @@ interface Props {
   onFaceRect: (rect: FaceRect) => void
 }
 
+const DEFAULT_RECT: FaceRect = { x: 0.31, y: 0.05, width: 0.38, height: 0.50 }
+
 export default function FaceMaskEditor({ imageSrc, onFaceRect }: Props) {
   const canvasRef   = useRef<HTMLCanvasElement>(null)
-  const [rect, setRect]       = useState<FaceRect | null>(null)
-  const [dragging, setDragging] = useState<string | null>(null) // 'move' | 'resize'
-  const [dragStart, setDragStart] = useState({ x: 0, y: 0 })
+  const imgRef      = useRef<HTMLImageElement | null>(null)
+  const [rect, setRect]           = useState<FaceRect | null>(null)
   const [detecting, setDetecting] = useState(true)
-  const [imgSize, setImgSize] = useState({ w: 0, h: 0 })
-  const imgRef = useRef<HTMLImageElement | null>(null)
+  const [mode, setMode]           = useState<'move' | 'draw'>('move')
+  const [dragState, setDragState] = useState<{
+    type: 'move' | 'draw' | null
+    startX: number; startY: number
+    origRect?: FaceRect
+  }>({ type: null, startX: 0, startY: 0 })
 
-  // 이미지 로드 & 얼굴 감지
+  const applyRect = useCallback((r: FaceRect) => {
+    setRect(r)
+    onFaceRect(r)
+  }, [onFaceRect])
+
+  // MediaPipe를 window 전역으로 로드 (타입 선언 불필요)
+  const detectFace = useCallback(async (img: HTMLImageElement) => {
+    setDetecting(true)
+    try {
+      // MediaPipe CDN 스크립트 동적 로드
+      await new Promise<void>((resolve, reject) => {
+        if ((window as Window & { FaceDetection?: unknown }).FaceDetection) { resolve(); return }
+        const script = document.createElement('script')
+        script.src = 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js'
+        script.crossOrigin = 'anonymous'
+        script.onload = () => resolve()
+        script.onerror = () => reject(new Error('script load failed'))
+        document.head.appendChild(script)
+      })
+
+      const win = window as Window & { FaceDetection?: new (config: unknown) => {
+        setOptions: (opts: unknown) => void
+        onResults: (cb: (r: { detections: Array<{ boundingBox: { xCenter: number; yCenter: number; width: number; height: number } }> }) => void) => void
+        send: (input: unknown) => Promise<void>
+      }}
+
+      if (!win.FaceDetection) throw new Error('FaceDetection not available')
+
+      const fd = new win.FaceDetection({
+        locateFile: (file: string) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`,
+      })
+      fd.setOptions({ model: 'full', minDetectionConfidence: 0.4 })
+
+      await new Promise<void>((resolve) => {
+        fd.onResults((results) => {
+          if (results.detections.length > 0) {
+            const bb = results.detections[0].boundingBox
+            const pad = 0.07
+            applyRect({
+              x:      Math.max(0, bb.xCenter - bb.width  / 2 - pad),
+              y:      Math.max(0, bb.yCenter - bb.height / 2 - pad * 2.5),
+              width:  Math.min(1, bb.width  + pad * 2),
+              height: Math.min(1, bb.height + pad * 3.5),
+            })
+          } else {
+            applyRect(DEFAULT_RECT)
+          }
+          resolve()
+        })
+        fd.send({ image: img })
+      })
+    } catch {
+      applyRect(DEFAULT_RECT)
+    }
+    setDetecting(false)
+  }, [applyRect])
+
   useEffect(() => {
     if (!imageSrc) return
     setDetecting(true)
     setRect(null)
-
     const img = new Image()
-    img.onload = async () => {
-      imgRef.current = img
-      setImgSize({ w: img.naturalWidth, h: img.naturalHeight })
-
-      try {
-        // MediaPipe Face Detection 동적 로드
-        const { FaceDetection } = await import('@mediapipe/face_detection')
-        const fd = new FaceDetection({
-          locateFile: (file: string) =>
-            `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`,
-        })
-        fd.setOptions({ model: 'short', minDetectionConfidence: 0.5 })
-
-        await new Promise<void>((resolve) => {
-          fd.onResults((results: { detections: Array<{ boundingBox: { xCenter: number; yCenter: number; width: number; height: number } }> }) => {
-            if (results.detections.length > 0) {
-              const bb = results.detections[0].boundingBox
-              // 얼굴 영역 약간 확장 (이마/턱 포함)
-              const pad = 0.08
-              const newRect: FaceRect = {
-                x:      Math.max(0, bb.xCenter - bb.width  / 2 - pad),
-                y:      Math.max(0, bb.yCenter - bb.height / 2 - pad * 2),
-                width:  Math.min(1 - Math.max(0, bb.xCenter - bb.width / 2 - pad), bb.width  + pad * 2),
-                height: Math.min(1 - Math.max(0, bb.yCenter - bb.height / 2 - pad * 2), bb.height + pad * 3),
-              }
-              setRect(newRect)
-              onFaceRect(newRect)
-            } else {
-              // 얼굴 미감지 시 기본값
-              const defaultRect: FaceRect = { x: 0.31, y: 0.05, width: 0.38, height: 0.50 }
-              setRect(defaultRect)
-              onFaceRect(defaultRect)
-            }
-            resolve()
-          })
-          fd.send({ image: img })
-        })
-      } catch {
-        // MediaPipe 로드 실패 시 기본값
-        const defaultRect: FaceRect = { x: 0.31, y: 0.05, width: 0.38, height: 0.50 }
-        setRect(defaultRect)
-        onFaceRect(defaultRect)
-      }
-      setDetecting(false)
-    }
+    img.onload = () => { imgRef.current = img; detectFace(img) }
     img.src = imageSrc
-  }, [imageSrc, onFaceRect])
+  }, [imageSrc, detectFace])
 
-  // Canvas에 마스크 그리기
+  // Canvas 그리기
   useEffect(() => {
     const canvas = canvasRef.current
-    const img = imgRef.current
-    if (!canvas || !img || !rect) return
-
-    const W = canvas.width
-    const H = canvas.height
+    const img    = imgRef.current
+    if (!canvas || !img) return
+    const W = canvas.width, H = canvas.height
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, W, H)
     ctx.drawImage(img, 0, 0, W, H)
+    if (!rect) return
 
-    const rx = rect.x * W
-    const ry = rect.y * H
-    const rw = rect.width  * W
-    const rh = rect.height * H
+    const rx = rect.x * W, ry = rect.y * H
+    const rw = rect.width * W, rh = rect.height * H
 
-    // 어두운 오버레이
-    ctx.fillStyle = 'rgba(0,0,0,0.45)'
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'
     ctx.fillRect(0, 0, W, H)
-
-    // 얼굴 영역 밝게
     ctx.clearRect(rx, ry, rw, rh)
     ctx.drawImage(img, rx, ry, rw, rh, rx, ry, rw, rh)
 
-    // 테두리
     ctx.strokeStyle = '#7C3AED'
-    ctx.lineWidth = 2
+    ctx.lineWidth = 2.5
     ctx.strokeRect(rx, ry, rw, rh)
 
-    // 모서리 핸들
-    const hs = 8
+    const hs = 9
     ctx.fillStyle = '#7C3AED'
-    ;[[rx, ry], [rx+rw, ry], [rx, ry+rh], [rx+rw, ry+rh]].forEach(([hx, hy]) => {
-      ctx.fillRect(hx - hs/2, hy - hs/2, hs, hs)
+    ;[[rx,ry],[rx+rw,ry],[rx,ry+rh],[rx+rw,ry+rh]].forEach(([hx,hy]) => {
+      ctx.fillRect(hx-hs/2, hy-hs/2, hs, hs)
     })
 
-    // 라벨
     ctx.fillStyle = '#7C3AED'
-    ctx.fillRect(rx, ry - 22, 72, 20)
+    ctx.fillRect(rx, ry - 24, 76, 22)
     ctx.fillStyle = 'white'
     ctx.font = '11px sans-serif'
-    ctx.fillText('교체 영역', rx + 6, ry - 7)
-  }, [rect, imgSize])
+    ctx.fillText('교체 영역', rx + 6, ry - 8)
+  }, [rect])
 
   const getRelPos = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const canvas = canvasRef.current!
-    const bounds = canvas.getBoundingClientRect()
-    return {
-      x: (e.clientX - bounds.left) / bounds.width,
-      y: (e.clientY - bounds.top)  / bounds.height,
-    }
+    const b = canvasRef.current!.getBoundingClientRect()
+    return { x: (e.clientX - b.left) / b.width, y: (e.clientY - b.top) / b.height }
   }
 
   const onMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!rect) return
     const pos = getRelPos(e)
-    const inRect =
-      pos.x >= rect.x && pos.x <= rect.x + rect.width &&
-      pos.y >= rect.y && pos.y <= rect.y + rect.height
-    if (inRect) {
-      setDragging('move')
-      setDragStart(pos)
+    if (mode === 'draw') {
+      setDragState({ type: 'draw', startX: pos.x, startY: pos.y })
+      return
     }
-  }, [rect])
+    if (rect) {
+      const inRect = pos.x >= rect.x && pos.x <= rect.x + rect.width && pos.y >= rect.y && pos.y <= rect.y + rect.height
+      if (inRect) setDragState({ type: 'move', startX: pos.x, startY: pos.y, origRect: rect })
+    }
+  }, [mode, rect])
 
   const onMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!dragging || !rect) return
+    if (!dragState.type) return
     const pos = getRelPos(e)
-    const dx = pos.x - dragStart.x
-    const dy = pos.y - dragStart.y
-    const newRect: FaceRect = {
-      x: Math.max(0, Math.min(1 - rect.width,  rect.x + dx)),
-      y: Math.max(0, Math.min(1 - rect.height, rect.y + dy)),
-      width:  rect.width,
-      height: rect.height,
+    if (dragState.type === 'draw') {
+      applyRect({
+        x: Math.min(pos.x, dragState.startX), y: Math.min(pos.y, dragState.startY),
+        width: Math.abs(pos.x - dragState.startX), height: Math.abs(pos.y - dragState.startY),
+      })
+      return
     }
-    setRect(newRect)
-    onFaceRect(newRect)
-    setDragStart(pos)
-  }, [dragging, rect, dragStart, onFaceRect])
+    if (dragState.type === 'move' && dragState.origRect) {
+      const dx = pos.x - dragState.startX, dy = pos.y - dragState.startY
+      applyRect({
+        x: Math.max(0, Math.min(1 - dragState.origRect.width,  dragState.origRect.x + dx)),
+        y: Math.max(0, Math.min(1 - dragState.origRect.height, dragState.origRect.y + dy)),
+        width: dragState.origRect.width, height: dragState.origRect.height,
+      })
+    }
+  }, [dragState, applyRect])
 
-  const onMouseUp = useCallback(() => setDragging(null), [])
+  const onMouseUp = useCallback(() => setDragState(p => ({ ...p, type: null })), [])
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-gray-500">얼굴 영역 확인 · 드래그로 조정 가능</p>
-        {detecting && (
-          <span className="text-xs text-violet-600 flex items-center gap-1">
-            <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/>
-            </svg>
-            얼굴 감지 중...
-          </span>
-        )}
+        <div className="flex gap-2">
+          <button onClick={() => setMode('move')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${mode === 'move' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-50 text-gray-600 border-gray-200'}`}>
+            ✥ 이동
+          </button>
+          <button onClick={() => setMode('draw')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${mode === 'draw' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-50 text-gray-600 border-gray-200'}`}>
+            ▭ 직접 그리기
+          </button>
+        </div>
+        <button onClick={() => imgRef.current && detectFace(imgRef.current)} disabled={detecting}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100 disabled:opacity-50 transition-all flex items-center gap-1">
+          {detecting ? (
+            <><svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/></svg>감지 중...</>
+          ) : '↺ 재감지'}
+        </button>
       </div>
-      <canvas
-        ref={canvasRef}
-        width={400}
-        height={400}
-        className="w-full rounded-xl cursor-move"
-        onMouseDown={onMouseDown}
-        onMouseMove={onMouseMove}
-        onMouseUp={onMouseUp}
-        onMouseLeave={onMouseUp}
+      <canvas ref={canvasRef} width={400} height={400}
+        className={`w-full rounded-xl ${mode === 'draw' ? 'cursor-crosshair' : 'cursor-move'}`}
+        onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
       />
-      {!detecting && rect && (
-        <p className="text-xs text-gray-400 text-center">
-          보라색 영역이 AI로 교체될 얼굴 부분입니다. 드래그로 위치를 조정하세요.
-        </p>
-      )}
+      <p className="text-xs text-gray-400 text-center">
+        {mode === 'draw' ? '드래그해서 교체할 얼굴 영역을 직접 그리세요' : '보라색 영역을 드래그해서 위치를 조정하세요'}
+      </p>
     </div>
   )
 }
