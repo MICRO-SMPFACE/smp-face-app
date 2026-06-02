@@ -22,56 +22,30 @@ const DEFAULT_RECT: FaceRect = { x: 0.31, y: 0.05, width: 0.38, height: 0.50 }
 interface Result { b64: string | null; url: string | null }
 type Step = 'step1' | 'step2' | 'done'
 
-async function composeFaceOnImage(
-  afterImageSrc: string,
-  faceSrc: string,
-  faceRect: FaceRect
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const afterImg = new Image()
-    const faceImg  = new Image()
-    afterImg.crossOrigin = 'anonymous'
-    faceImg.crossOrigin  = 'anonymous'
-
-    afterImg.onload = () => {
-      faceImg.onload = () => {
-        const SIZE = 1024
-        const canvas = document.createElement('canvas')
-        canvas.width = SIZE; canvas.height = SIZE
-        const ctx = canvas.getContext('2d')!
-
-        ctx.drawImage(afterImg, 0, 0, SIZE, SIZE)
-
-        const px = Math.round(faceRect.x      * SIZE)
-        const py = Math.round(faceRect.y      * SIZE)
-        const pw = Math.round(faceRect.width  * SIZE)
-        const ph = Math.round(faceRect.height * SIZE)
-
-        ctx.drawImage(faceImg, px, py, pw, ph, px, py, pw, ph)
-        resolve(canvas.toDataURL('image/png'))
-      }
-      faceImg.onerror = reject
-      faceImg.src = faceSrc
-    }
-    afterImg.onerror = reject
-    afterImg.src = afterImageSrc
-  })
-}
-
 export default function Home() {
-  const [step, setStep]                   = useState<Step>('step1')
-  const [beforeFile, setBeforeFile]       = useState<File | null>(null)
-  const [beforePreview, setBeforePreview] = useState<string | null>(null)
-  const [afterPreview, setAfterPreview]   = useState<string | null>(null)
-  const [faceRect, setFaceRect]           = useState<FaceRect>(DEFAULT_RECT)
-  const [options, setOptions]             = useState<FaceOptions>(DEFAULT_OPTIONS)
-  const [count, setCount]                 = useState(2)
-  const [step1Results, setStep1Results]   = useState<Result[]>([])
-  const [selectedIndex, setSelectedIndex] = useState(-1)
-  const [finalBefore, setFinalBefore]     = useState<string | null>(null)
-  const [finalAfter, setFinalAfter]       = useState<string | null>(null)
-  const [loading, setLoading]             = useState(false)
-  const [error, setError]                 = useState<string | null>(null)
+  const [step, setStep]                     = useState<Step>('step1')
+
+  // 전사진
+  const [beforeFile, setBeforeFile]         = useState<File | null>(null)
+  const [beforePreview, setBeforePreview]   = useState<string | null>(null)
+  const [beforeRect, setBeforeRect]         = useState<FaceRect>(DEFAULT_RECT)
+
+  // 후사진
+  const [afterFile, setAfterFile]           = useState<File | null>(null)
+  const [afterPreview, setAfterPreview]     = useState<string | null>(null)
+  const [afterRect, setAfterRect]           = useState<FaceRect>(DEFAULT_RECT)
+
+  const [options, setOptions]               = useState<FaceOptions>(DEFAULT_OPTIONS)
+  const [count, setCount]                   = useState(2)
+
+  // 결과
+  const [step1Results, setStep1Results]     = useState<Result[]>([])
+  const [selectedIndex, setSelectedIndex]   = useState(-1)
+  const [finalBefore, setFinalBefore]       = useState<string | null>(null)
+  const [finalAfter, setFinalAfter]         = useState<string | null>(null)
+
+  const [loading, setLoading]               = useState(false)
+  const [error, setError]                   = useState<string | null>(null)
 
   const handleBeforeImage = useCallback((file: File) => {
     setBeforeFile(file)
@@ -80,17 +54,20 @@ export default function Home() {
     reader.readAsDataURL(file)
     setStep1Results([])
     setSelectedIndex(-1)
-    setFaceRect(DEFAULT_RECT)
+    setBeforeRect(DEFAULT_RECT)
     setError(null)
   }, [])
 
   const handleAfterImage = useCallback((file: File) => {
+    setAfterFile(file)
     const reader = new FileReader()
     reader.onload = (e) => setAfterPreview(e.target?.result as string)
     reader.readAsDataURL(file)
+    setAfterRect(DEFAULT_RECT)
     setError(null)
   }, [])
 
+  // STEP 1: 전사진 인페인팅
   const generateStep1 = useCallback(async () => {
     if (!beforeFile) return
     setLoading(true)
@@ -100,13 +77,14 @@ export default function Home() {
 
     try {
       const fd = new FormData()
+      fd.append('mode',    'step1')
       fd.append('image',   beforeFile)
       fd.append('options', JSON.stringify(options))
       fd.append('count',   String(count))
-      fd.append('faceX',   String(faceRect.x))
-      fd.append('faceY',   String(faceRect.y))
-      fd.append('faceW',   String(faceRect.width))
-      fd.append('faceH',   String(faceRect.height))
+      fd.append('faceX',   String(beforeRect.x))
+      fd.append('faceY',   String(beforeRect.y))
+      fd.append('faceW',   String(beforeRect.width))
+      fd.append('faceH',   String(beforeRect.height))
 
       const res  = await fetch('/api/generate', { method: 'POST', body: fd })
       const data = await res.json()
@@ -117,37 +95,60 @@ export default function Home() {
     } finally {
       setLoading(false)
     }
-  }, [beforeFile, options, count, faceRect])
+  }, [beforeFile, options, count, beforeRect])
 
+  // STEP 2: 후사진 인페인팅 (전사진 결과 레퍼런스)
   const generateStep2 = useCallback(async () => {
-    if (!afterPreview || selectedIndex < 0) return
+    if (!afterFile || selectedIndex < 0) return
     setLoading(true)
     setError(null)
 
     try {
       const selectedFace = step1Results[selectedIndex]
-      const faceSrc = selectedFace.b64
+
+      const fd = new FormData()
+      fd.append('mode',    'step2')
+      fd.append('image',   afterFile)
+      fd.append('options', JSON.stringify(options))
+      fd.append('faceX',   String(afterRect.x))
+      fd.append('faceY',   String(afterRect.y))
+      fd.append('faceW',   String(afterRect.width))
+      fd.append('faceH',   String(afterRect.height))
+
+      // 전사진 결과를 레퍼런스로 전달
+      if (selectedFace.b64) {
+        fd.append('refB64', selectedFace.b64)
+      }
+
+      const res  = await fetch('/api/generate', { method: 'POST', body: fd })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || '오류가 발생했습니다.')
+
+      const beforeSrc = selectedFace.b64
         ? `data:image/png;base64,${selectedFace.b64}`
         : selectedFace.url || ''
+      const afterResult = data.results[0]
+      const afterSrc = afterResult.b64
+        ? `data:image/png;base64,${afterResult.b64}`
+        : afterResult.url || ''
 
-      const afterSrc = await composeFaceOnImage(afterPreview, faceSrc, faceRect)
-      setFinalBefore(faceSrc)
+      setFinalBefore(beforeSrc)
       setFinalAfter(afterSrc)
       setStep('done')
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : '이미지 합성 중 오류가 발생했습니다.')
+      setError(e instanceof Error ? e.message : '오류가 발생했습니다.')
     } finally {
       setLoading(false)
     }
-  }, [afterPreview, selectedIndex, step1Results, faceRect])
+  }, [afterFile, selectedIndex, step1Results, options, afterRect])
 
   const reset = useCallback(() => {
     setStep('step1')
     setBeforeFile(null); setBeforePreview(null)
-    setAfterPreview(null)
+    setAfterFile(null);  setAfterPreview(null)
     setStep1Results([]); setSelectedIndex(-1)
     setFinalBefore(null); setFinalAfter(null)
-    setFaceRect(DEFAULT_RECT)
+    setBeforeRect(DEFAULT_RECT); setAfterRect(DEFAULT_RECT)
     setError(null)
   }, [])
 
@@ -178,12 +179,13 @@ export default function Home() {
         </div>
       </header>
 
+      {/* Step indicator */}
       <div className="max-w-5xl mx-auto px-6 pt-6">
         <div className="flex items-center gap-3 mb-6">
           {(['step1', 'step2', 'done'] as Step[]).map((s, i) => {
             const labels = ['1단계 · 전사진', '2단계 · 후사진', '완료']
             const currentIdx = ['step1','step2','done'].indexOf(step)
-            const isCurrent = step === s
+            const isCurrent  = step === s
             const isDonePrev = i < currentIdx
             return (
               <div key={s} className="flex items-center gap-3">
@@ -192,11 +194,10 @@ export default function Home() {
                   isDonePrev ? 'bg-violet-100 text-violet-600' :
                   'bg-gray-100 text-gray-400'
                 }`}>
-                  {isDonePrev ? (
-                    <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
-                    </svg>
-                  ) : <span>{i + 1}</span>}
+                  {isDonePrev
+                    ? <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5"/></svg>
+                    : <span>{i + 1}</span>
+                  }
                   {labels[i]}
                 </div>
                 {i < 2 && <div className="w-6 h-px bg-gray-200"></div>}
@@ -208,6 +209,7 @@ export default function Home() {
 
       <main className="max-w-5xl mx-auto px-6 pb-8">
 
+        {/* 완료 */}
         {step === 'done' && finalBefore && finalAfter && (
           <BeforeAfterView
             beforeSrc={finalBefore}
@@ -218,10 +220,14 @@ export default function Home() {
           />
         )}
 
+        {/* 1단계 & 2단계 */}
         {step !== 'done' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+
+            {/* 왼쪽 패널 */}
             <div className="space-y-6">
 
+              {/* 전사진 업로드 */}
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">1단계</span>
@@ -231,12 +237,9 @@ export default function Home() {
                   <UploadZone label="시술 전 사진" onFile={handleBeforeImage} preview={null} />
                 ) : (
                   <div className="space-y-3">
-                    <FaceMaskEditor
-                      imageSrc={beforePreview}
-                      onFaceRect={setFaceRect}
-                    />
+                    <FaceMaskEditor imageSrc={beforePreview} onFaceRect={setBeforeRect} />
                     <button
-                      onClick={() => { setBeforePreview(null); setBeforeFile(null); setStep1Results([]); }}
+                      onClick={() => { setBeforePreview(null); setBeforeFile(null); setStep1Results([]) }}
                       className="w-full py-2 text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded-lg transition-colors"
                     >
                       사진 다시 선택
@@ -245,11 +248,13 @@ export default function Home() {
                 )}
               </div>
 
+              {/* 얼굴 설정 */}
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <h2 className="text-sm font-semibold text-gray-900 mb-4">얼굴 설정</h2>
                 <FaceOptionsPanel options={options} onChange={setOptions} />
               </div>
 
+              {/* 고정 태그 */}
               <div className="bg-violet-50 rounded-xl px-4 py-3 border border-violet-100">
                 <p className="text-xs font-medium text-violet-700 mb-1.5">자동 적용 (고정)</p>
                 <div className="flex flex-wrap gap-1.5">
@@ -259,22 +264,38 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* 후사진 업로드 (2단계) */}
               {step === 'step2' && (
                 <div className="bg-white rounded-2xl border border-gray-100 p-6">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">2단계</span>
                     <h2 className="text-sm font-semibold text-gray-900">후사진 업로드</h2>
                   </div>
-                  <UploadZone label="시술 후 사진" onFile={handleAfterImage} preview={afterPreview} />
+                  {!afterPreview ? (
+                    <UploadZone label="시술 후 사진" onFile={handleAfterImage} preview={null} />
+                  ) : (
+                    <div className="space-y-3">
+                      <FaceMaskEditor imageSrc={afterPreview} onFaceRect={setAfterRect} />
+                      <button
+                        onClick={() => { setAfterPreview(null); setAfterFile(null) }}
+                        className="w-full py-2 text-xs text-gray-400 hover:text-gray-600 border border-gray-200 rounded-lg transition-colors"
+                      >
+                        사진 다시 선택
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
+            {/* 오른쪽 패널 */}
             <div className="space-y-6">
+
+              {/* 1단계 생성 */}
               <div className="bg-white rounded-2xl border border-gray-100 p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">1단계</span>
-                  <h2 className="text-sm font-semibold text-gray-900">얼굴 생성</h2>
+                  <h2 className="text-sm font-semibold text-gray-900">전사진 얼굴 생성</h2>
                 </div>
 
                 <div className="mb-4">
@@ -305,9 +326,14 @@ export default function Home() {
                   )}
                 </button>
 
-                {error && <div className="mt-3 p-3 bg-red-50 border border-red-100 rounded-lg"><p className="text-xs text-red-600">{error}</p></div>}
+                {error && step === 'step1' && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-100 rounded-lg">
+                    <p className="text-xs text-red-600">{error}</p>
+                  </div>
+                )}
               </div>
 
+              {/* 1단계 결과 */}
               {(step1Results.length > 0 || (loading && step === 'step1')) && (
                 <div className="bg-white rounded-2xl border border-gray-100 p-6">
                   <ResultViewer
@@ -321,32 +347,39 @@ export default function Home() {
                 </div>
               )}
 
+              {/* 2단계 후사진 생성 */}
               {step === 'step2' && (
                 <div className="bg-white rounded-2xl border border-gray-100 p-6">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="text-xs font-semibold text-white bg-violet-600 px-2 py-0.5 rounded-full">2단계</span>
-                    <h2 className="text-sm font-semibold text-gray-900">후사진에 얼굴 적용</h2>
+                    <h2 className="text-sm font-semibold text-gray-900">후사진 얼굴 생성</h2>
                   </div>
 
-                  {selectedIndex >= 0 && (
-                    <div className="mb-4 p-3 bg-violet-50 rounded-lg border border-violet-100">
-                      <p className="text-xs text-violet-700">결과 {selectedIndex + 1} 얼굴이 후사진에 적용됩니다</p>
-                    </div>
-                  )}
+                  <div className="mb-4 p-3 bg-violet-50 rounded-lg border border-violet-100">
+                    <p className="text-xs text-violet-700">
+                      선택한 얼굴을 레퍼런스로 후사진에 동일 인물로 생성합니다
+                    </p>
+                  </div>
 
-                  <button onClick={generateStep2} disabled={!afterPreview || selectedIndex < 0 || loading}
+                  <p className="text-xs text-gray-400 text-center mb-3">예상 비용: 약 $0.034 / 회</p>
+
+                  <button onClick={generateStep2} disabled={!afterFile || selectedIndex < 0 || loading}
                     className={`w-full py-3 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2 ${
-                      afterPreview && selectedIndex >= 0 && !loading ? 'bg-violet-600 hover:bg-violet-700 text-white active:scale-[0.98]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      afterFile && selectedIndex >= 0 && !loading ? 'bg-violet-600 hover:bg-violet-700 text-white active:scale-[0.98]' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     }`}
                   >
                     {loading && step === 'step2' ? (
-                      <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/></svg>적용 중...</>
+                      <><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3-3-3-3v4a8 8 0 00-8 8h4z"/></svg>생성 중...</>
                     ) : (
-                      <><svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>후사진에 동일 얼굴 적용하기</>
+                      <><svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>후사진 얼굴 생성하기</>
                     )}
                   </button>
 
-                  {error && <div className="mt-3 p-3 bg-red-50 border border-red-100 rounded-lg"><p className="text-xs text-red-600">{error}</p></div>}
+                  {error && step === 'step2' && (
+                    <div className="mt-3 p-3 bg-red-50 border border-red-100 rounded-lg">
+                      <p className="text-xs text-red-600">{error}</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
